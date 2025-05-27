@@ -1,0 +1,112 @@
+# your_project_name/configs/simplified_debug.yaml
+# Simplified configuration for debugging or baseline runs.
+# Disables: GPU augs, EMA, torch.compile, complex samplers, complex losses.
+# Uses: CPU augs (can be further simplified), CrossEntropyLoss, AdamW.
+
+# --- Experiment Setup ---
+experiment_setup:
+  experiment_name: "simplified_debug_run"
+  seed: 21
+  device: "cuda"
+  TQDM_NCOLS: 100
+
+# --- Model Configuration ---
+model:
+  type: "efficientnet_b0" # Or your preferred simple model
+  pretrained: True # Keep if you want pretrained weights, comment out for random init
+
+# --- Training Loop Parameters ---
+training:
+  num_epochs: 20 # Reduced for faster debugging runs
+  batch_size: 32 # Can be reduced if memory is an issue for debugging
+  optimizer:
+    type: "AdamW" # Standard AdamW
+    lr: 0.0003
+    weight_decay: 0.0001
+  scheduler:
+    type: "CosineAnnealingLR" # Simpler scheduler
+    # step_size: 10  # Reduce LR every 10 epochs
+    gamma: 0.1     # by a factor of 0.1
+    t_max: 20 # Not used for StepLR
+    min_lr: 0.0 # Not used for StepLR
+  amp_enabled: True # Disabled Automatic Mixed Precision for simplicity
+  accum_steps: 2
+  val_interval: 2 # Validate every epoch for closer monitoring during debug
+  model_selection_metric: "mean_optimal_sensitivity"
+  save_optimal_thresholds: False
+  early_stopping_patience: 5 # Shorter patience for faster debug cycles
+  ema_decay: 0 # EMA disabled
+  use_ema_for_val: False # EMA disabled
+  freeze_epochs: 0 # No freezing for simplicity
+  backbone_lr_mult: 0.1 # Still relevant if unfreezing a pretrained model
+  loss:
+    type: "focal_ce_loss" # Simple CrossEntropyLoss
+    # All other loss-specific params (focal, wce, ldam) are ignored
+  drw_schedule_epochs: [] # DRW disabled
+  pauc_max_fpr: 0.2
+
+# --- Data Handling & Augmentations ---
+data:
+  num_workers: 6 # Reduced for simplicity, 0 can also be good for debugging data issues
+  sampler:
+    type: "default" # Basic sampler, no class balancing via config
+  # --- CPU Augmentations (applied by DataLoader workers) ---
+  # You can further simplify these augmentations if needed for debugging
+  cpu_augmentations:
+    resize: 256 # Or match your model's expected input size directly if no cropping
+    crop_size: 224 # Make sure this is sensible for your model
+    norm_mean: [0.485, 0.456, 0.406] # Standard ImageNet stats
+    norm_std: [0.229, 0.224, 0.225]  # Standard ImageNet stats
+    train: # Training specific augmentations
+      # Minimal augmentations for debugging:
+      random_horizontal_flip_p: 0.5
+      random_vertical_flip_p: 0.0
+
+      # --- All other complex CPU augmentations from base_experiment.yaml are commented out/removed for simplicity ---
+      # affine_degrees: 0
+      # affine_translate: [0.0, 0.0]
+      # affine_scale_range: [1.0, 1.0]
+      # affine_shear_degrees: 0
+      # color_jitter_brightness: 0.0
+      # color_jitter_contrast: 0.0
+      # color_jitter_saturation: 0.0
+      # color_jitter_hue: 0.0
+      # rand_aug_n: 0 # Disable RandAugment
+      # rand_aug_m: 0
+
+  # --- GPU Augmentations ---
+  gpu_augmentations:
+    enable: False # GPU augmentations disabled
+    pipeline: []
+
+# --- Paths Configuration ---
+# Ensure these paths are correct relative to where you run train_cv.py
+paths:
+  # project_root: "."
+  labels_csv: "../splits/training/labels.csv" # Or your specific labels file
+  train_root: "../splits/training"           # Or your specific image root
+  log_dir: "../outputs/tensorboard_debug"    # Separate log dir for debug runs
+  ckpt_dir: "../outputs/checkpoints_debug"   # Separate ckpt dir for debug runs
+
+# --- PyTorch Compile (torch.compile) ---
+torch_compile:
+  enable: False # torch.compile disabled
+
+# --- TensorBoard Logging ---
+# Kept for basic monitoring, can be simplified further if needed
+tensorboard_logging:
+  enable: True
+  log_interval_batches_train: 20 # Log more frequently for debug
+  log_interval_batches_val: 5
+  log_epoch_summary: True
+  log_lr: True
+  log_throughput: False # Less critical for debug
+  log_gpu_time_epoch: False # Less critical for debug
+  image_logging:
+    enable: False # Disabled image logging for speed
+  profiler:
+    enable: False # Profiler disabled
+  memory_logging:
+    enable: True # Keep memory logging to check for basic issues
+    log_interval_batches: 50
+    log_epoch_summary: True
