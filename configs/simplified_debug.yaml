@@ -1,0 +1,177 @@
+# your_project_name/configs/config_cv_final_optimized_fully_commented.yaml
+# Fully commented configuration for train_cv_final_optimized.py
+# Explains options and aligns with script capabilities.
+
+# --- Experiment Setup ---
+experiment_setup:
+  experiment_name: "effb0_unk_focal_BCE" # Descriptive name
+  seed: 42                                                # Random seed
+  device: "cuda"                                          # "cuda" or "cpu"
+  TQDM_NCOLS: 120                                         # TQDM progress bar width
+
+# --- Model Configuration ---
+model:
+  type: "efficientnet_b0"    # Model type from models/factory.py (e.g., "efficientnet_b3")
+  pretrained: true           # Use pretrained weights (e.g., ImageNet)
+  # numClasses is automatically set by the training script from labels_csv
+
+# --- Training Loop Parameters ---
+training:
+  num_epochs: 40            # Total training epochs
+  batch_size: 32            # Samples per batch
+
+  optimizer:
+    type: "AdamW"           # Optimizer (e.g., "AdamW", "SGD")
+    lr: 0.0003              # Learning rate
+    weight_decay: 0.0001    # Weight decay (L2 penalty)
+    # For SGD, you might add: momentum: 0.9
+
+  scheduler:
+    type: "CosineAnnealingLR" # LR scheduler (e.g., "CosineAnnealingLR", "StepLR")
+    t_max: 40                 # For CosineAnnealingLR: Usually num_epochs
+    min_lr: 0.000001          # For CosineAnnealingLR: Minimum LR
+    # For StepLR:
+    # step_size: 10           # Epochs before LR decay
+    # gamma: 0.1              # LR decay factor
+
+  amp_enabled: true         # Automatic Mixed Precision (float16/float32)
+  accum_steps: 2            # Gradient accumulation steps
+  val_interval: 1           # Compute "lighter" validation metrics every N epochs
+  val_metrics_heavy_interval: 39 # Compute "heavy" validation metrics (PR curves, APs) every N validation cycles.
+                                 # Set to num_epochs or num_epochs-1 for last validation pass only.
+
+  model_selection_metric: "f1_macro_post_hoc_unk" # Metric for best checkpoint & early stopping.
+                                                 # Options: "macro_auc",
+                                                 # "mean_optimal_f1" (from PR curves),
+                                                 # "mean_optimal_sensitivity" (from PR curves),
+                                                 # "f1_macro_post_hoc_unk",
+                                                 # "accuracy_post_hoc_unk"
+  save_optimal_thresholds_from_pr: true # Save per-class optimal thresholds from PR curves in best checkpoint.
+
+  # Post-hoc UNK (Unknown Class) Handling
+  post_hoc_unk_threshold: 0.20 # Confidence threshold for assigning UNK. null or remove to disable.
+  unk_label_string: "UNK"     # String for UNK class in label2idx.
+
+  early_stopping_patience: 7 # Epochs without improvement before stopping.
+  ema_decay: 0              # Exponential Moving Average decay. 0.0 for no EMA. Common: 0.999.
+  use_ema_for_val: false       # Use EMA model for validation if ema_decay > 0.
+  freeze_epochs: 0            # Initial epochs to freeze backbone layers.
+  backbone_lr_mult: 0.1       # LR multiplier for backbone when unfrozen.
+
+  loss:
+    type: "focal_ce_loss"     # Loss function type.
+                              # Options: "cross_entropy", "weighted_cross_entropy",
+                              # "focal_ce_loss", "ldam_loss"
+    # --- Parameters for Focal CE Loss (if type: "focal_ce_loss") ---
+    focal_alpha: 1.0        # Alpha for focal loss (scalar or list for per-class).
+    focal_gamma: 2.0        # Gamma for focal loss.
+    #focal_alpha_is_per_class: false # If true and focal_alpha is a list of weights
+    #class_weighting_scheme: "log_freq_plus_one" # If focal_alpha_is_per_class is true, how to derive weights.
+
+    # --- Parameters for Weighted Cross Entropy (if type: "weighted_cross_entropy") ---
+    # wce_k_factor: 0.5       # k-factor for (N/n_i)^k weighting. 0 for no effective weighting.
+
+    # --- Parameters for LDAM Loss (if type: "ldam_loss") ---
+    # ldam_max_margin: 0.5    # Maximum margin C.
+    # ldam_scale: 30.0        # Scaling factor s for logits.
+    # ldam_use_effective_number_margin: true # Use effective number of samples for margin.
+    # ldam_effective_number_beta: 0.999    # Beta for effective number calculation.
+
+  drw_schedule_epochs: []   # Deferred Re-Weighting schedule (list of epochs, e.g., [30, 40]).
+                            # Used with LDAMLoss or CrossEntropyLoss/WeightedCrossEntropy. Empty for no DRW.
+  pauc_max_fpr: 0.2         # For partial AUC (pAUC) calculation (e.g., pAUC@FPR=0.2).
+
+# --- Data Handling & Augmentations ---
+data:
+  num_workers: 6            # CPU workers for DataLoader. 0 for main process.
+  prefetch_factor: 4        # Batches to prefetch per worker (if num_workers > 0).
+  persistent_workers: true  # Keep workers alive (if num_workers > 0).
+  image_loader: "pil"       # "pil" (Pillow) or "opencv".
+  enable_ram_cache: false   # Cache decoded images in RAM (uses memory).
+
+  sampler:
+    type: "class_balanced_sqrt" # Sampler for training. "default" or "class_balanced_sqrt".
+
+  cpu_augmentations: # torchvision.transforms on CPU
+    resize: 256             # Initial resize (int or [h, w]).
+    crop_size: 224          # Final crop size (int or [h, w]).
+    norm_mean: [0.485, 0.456, 0.406] # Normalization mean.
+    norm_std:  [0.229, 0.224, 0.225] # Normalization std.
+    train: # Training-only augmentations
+      random_horizontal_flip_p: 0.5
+      random_vertical_flip_p: 0.0
+      affine_degrees: 10
+      affine_translate: [0.05, 0.05] # Max translation fraction [h, v].
+      affine_scale_range: [0.9, 1.1] # Scaling factor range [min, max].
+      affine_shear_degrees: 5        # Shear angle range.
+      # affine_fill: 0               # Fill value for RandomAffine.
+      color_jitter_brightness: 0.1   # ColorJitter brightness factor.
+      color_jitter_contrast: 0.1     # ColorJitter contrast factor.
+      color_jitter_saturation: 0.1   # ColorJitter saturation factor.
+      color_jitter_hue: 0.05         # ColorJitter hue factor.
+      rand_aug_n: 2                # RandAugment: Number of ops.
+      rand_aug_m: 9                # RandAugment: Magnitude (0-30).
+
+  gpu_augmentations: # Kornia-based augmentations on GPU
+    enable: false
+    # pipeline: [] # List of augmentations. Example:
+    #   # - name: "RandomHorizontalFlipGPU"
+    #   #   params: {p: 0.5}
+    #   # - name: "ColorJitterGPU"
+    #   #   params: {brightness: [0.8, 1.2], contrast: [0.8, 1.2]} # Kornia uses ranges
+
+
+# --- Paths Configuration ---
+paths:
+  project_root: "." # Define if paths below are relative to a specific project root different from config file dir
+  labels_csv: "splits/training/labels.csv" # Path relative to where script is run or project_root
+  train_root: "splits/training"
+  log_dir: "outputs/tensorboard_cv_light_corrected"
+  ckpt_dir: "outputs/checkpoints_cv_light_corrected"
+
+# --- PyTorch Compile (torch.compile) ---
+torch_compile: # For PyTorch 2.0+
+  enable: false
+  # mode: "default"       # "default", "reduce-overhead", "max-autotune"
+  # fullgraph: false
+  # dynamic: false
+  # backend: "inductor"
+
+# --- TensorBoard Logging ---
+tensorboard_logging:
+  enable: true                  # Master switch for TensorBoard.
+  log_interval_batches_train: 0 # Log train batch metrics every N batches. 0 to disable.
+  log_interval_batches_val: 0   # Log val batch metrics every N batches. 0 to disable.
+  log_epoch_summary: true       # Log epoch-level summary metrics.
+  log_lr: true                  # Log learning rate per epoch.
+  log_throughput: true          # Log training throughput (samples/sec).
+  log_gpu_time_epoch: true      # Log GPU time per training epoch (if profiler batch timing or main profiler active).
+
+  image_logging: # Log sample images
+    enable: false
+    # num_samples: 4
+    # denormalize: True
+    # log_at_epochs: [0, 24, 49] # List of epochs to log images.
+    # log_train_input: True
+    # log_val_input: True
+
+  profiler: # PyTorch Profiler settings
+    enable: false               # Enable PyTorch profiler for a specific epoch.
+    profile_epoch: 1            # Which epoch to profile if profiler.enable is True.
+    enable_batch_timing_always: false # If True, CudaTimer for batch GPU time runs (respecting log_interval_train)
+                                      # even if main profiler is off for the current epoch.
+    # --- Profiler schedule parameters (if profiler.enable is True) ---
+    # wait_steps: 1             # Steps to wait before starting.
+    # warmup_steps: 1           # Steps for warmup.
+    # active_steps: 3           # Steps to actively profile.
+    # repeat_cycles: 0          # Number of times to repeat wait/warmup/active cycle.
+    # record_shapes: True
+    # profile_memory: True      # Profile memory allocations.
+    # with_stack: False         # Record call stacks (can be expensive).
+    # sort_by: "self_cuda_time_total" # How to sort profiler table output.
+    # row_limit: 20             # Rows in profiler table output.
+
+  memory_logging: # GPU Memory logging
+    enable: false               # True to log GPU memory usage. Peak epoch memory is always logged if this is true.
+    # log_interval_batches: 0   # Log batch memory stats every N batches. 0 to disable per-batch memory logging.
+    # log_epoch_summary: True   # Redundant for epoch peaks; peak epoch memory is logged if memory_logging.enable=True.

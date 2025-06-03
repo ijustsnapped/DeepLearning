@@ -1,0 +1,185 @@
+# configs/config_meta_effb3_advanced.yaml
+
+experiment_setup:
+  experiment_name: "meta_effb3_ldam_drw_warmcold"
+  seed: 42
+  device: "cuda" # or "mps", "cpu"
+  TQDM_NCOLS: 120 # Width of tqdm progress bars
+
+model:
+  base_cnn_type: "efficientnet_b3" # Base CNN model from timm
+  pretrained_cnn: true             # Use pretrained weights for the base CNN
+  # numClasses for the model's output layer is set by the script based on data
+
+  meta_head_args: # Arguments for the CNNWithMetadata's metadata processing head
+    # metadata_input_dim is set by the script from the dataset
+    meta_mlp_hidden_dim: 128     # Hidden units in the first layer of metadata MLP
+    meta_mlp_output_dim: 64      # Output features from metadata MLP (to be concatenated with image features)
+    meta_dropout_p: 0.3          # Dropout probability in metadata MLP
+    post_concat_dim: 512         # Hidden units in FC layer after concatenating image & meta features
+    post_concat_dropout_p: 0.4   # Dropout probability after concatenation layer
+
+training: # Global settings, also defaults for Phase 1 (Joint/Warm Training)
+  num_epochs: 50             # Epochs for Phase 1 (Joint Training) - ADJUST AS NEEDED
+  batch_size: 32             # Adjusted for EffNet-B3 + Metadata memory. May need further tuning.
+  amp_enabled: true          # Enable Automatic Mixed Precision
+  accum_steps: 2             # Gradient accumulation steps
+  val_interval: 1            # Validate every N epochs
+  val_metrics_heavy_interval: 24 # Run heavy metrics (like PR curves) e.g., on the last epoch of phase 1
+
+  optimizer:
+    type: "AdamW"
+    lr: 0.0002             # Learning rate for Phase 1. Might need tuning.
+    weight_decay: 0.0001
+
+  scheduler:
+    type: "CosineAnnealingLR"
+    t_max: 25              # Corresponds to Phase 1 num_epochs
+    min_lr: 0.000001       # Minimum learning rate for cosine annealing
+
+  loss:
+    type: "ldam_loss"     # Label-Distribution-Aware Margin Loss
+    ldam_params: # Parameters specific to LDAMLoss
+      max_margin: 0.5      # Maximum margin value (delta_k in paper)
+      scale: 30.0          # Scaling factor 's' for logits
+      use_effective_number_margin: true # Calculate margin based on effective number of samples
+      effective_number_beta: 0.999    # Beta for effective number calculation
+  
+  drw_schedule_epochs: [12]   # Deferred Re-Weighting: Start LDAM class re-weighting at global epoch 12.
+                               # For a 25-epoch Phase 1, this is roughly after the first half.
+                               # Before this, LDAM uses its margins but no explicit class re-weighting.
+
+  model_selection_metric: "f1_macro_post_hoc_unk" # Metric to select the best model checkpoint
+  exclude_unk_from_training_model: true # 'UNK' class is not learned by the model directly
+  save_optimal_thresholds_from_pr: true   # Save optimal per-class thresholds from PR curves
+
+  #post_hoc_unk_threshold: 0.20 # Softmax confidence threshold to classify a sample as 'UNK'
+  #unk_label_string: "UNK"      # String identifier for the unknown class
+
+  early_stopping_patience: 7    # Patience for Phase 1 early stopping
+  ema_decay: 0.0                # Exponential Moving Average decay (0.0 = disabled)
+  use_ema_for_val: false        # Whether to use EMA model for validation
+  pauc_max_fpr: 0.2             # Max False Positive Rate for partial AUROC calculation
+
+meta_tuning: # Phase 2: Meta Head Fine-tuning (Backbone Frozen - "Cold" phase)
+  enable: true              # Set to true to run Phase 2
+  num_epochs: 15            # Epochs for Phase 2
+  batch_size: 48            # Can often be larger when backbone is frozen
+  
+  optimizer: # Optimizer settings specific to Phase 2
+    type: "AdamW"
+    lr: 0.00005             # Typically a smaller LR for fine-tuning
+    weight_decay: 0.00001
+  
+  scheduler: # Scheduler settings specific to Phase 2
+    type: "CosineAnnealingLR"
+    t_max: 15               # Corresponds to Phase 2 num_epochs
+    min_lr: 0.0000001       # Very small min LR for fine-tuning
+  
+  val_interval: 1
+  early_stopping_patience: 5 # Patience for Phase 2 early stopping
+  accum_steps: 1             # Optional: can differ from P1; 1 means no accumulation for P2
+
+data:
+  num_workers: 6
+  prefetch_factor: 4         # Only if num_workers > 0 and persistent_workers = true
+  persistent_workers: true   # Keep workers alive between epochs if num_workers > 0
+  image_loader: "pil"        # "pil" or "opencv"
+  enable_ram_cache: false    # Cache images in RAM (can consume a lot of memory)
+
+  meta_features_names: [  # List of metadata column names from your meta_csv
+    "age_zscore",
+    "anatom_site_general_anterior torso",
+    "anatom_site_general_head/neck",
+    "anatom_site_general_lateral torso",
+    "anatom_site_general_lower extremity",
+    "anatom_site_general_oral/genital",
+    "anatom_site_general_palms/soles",
+    "anatom_site_general_posterior torso",
+    "anatom_site_general_upper extremity",
+    "anatom_site_general_nan", # Indicates if anatom_site was originally NaN
+    "sex_female",
+    "sex_male",
+    "sex_nan"                  # Indicates if sex was originally NaN
+  ]
+  meta_augmentation_p: 0.1   # Probability to augment metadata features (e.g., mask out a group)
+  meta_nan_fill_value: 0.0   # Value to use for augmented "missing" numerical features
+
+  sampler:
+    type: "class_balanced_sqrt" # Sampler for training. 1/sqrt(N_c) weighting.
+
+  cpu_augmentations: # Standard torchvision augmentations
+    resize: 380             # EfficientNet-B3 typical input is 300x300. Resize slightly larger.
+    crop_size: 300
+    norm_mean: [0.485, 0.456, 0.406] # ImageNet mean
+    norm_std:  [0.229, 0.224, 0.225] # ImageNet std
+    train: # Training specific augmentations
+      random_horizontal_flip_p: 0.5
+      # random_vertical_flip_p: 0.0 # Usually not for general images unless task-appropriate
+      affine_degrees: 10
+      affine_translate: [0.05, 0.05] # fraction of image size
+      affine_scale_range: [0.9, 1.1]
+      # affine_shear_degrees: 5 # Optional
+      # affine_fill: 0 # Integer fill value for RandomAffine
+      color_jitter_brightness: 0.1
+      color_jitter_contrast: 0.1
+      # color_jitter_saturation: 0.1 # Optional
+      # color_jitter_hue: 0.05 # Optional
+      rand_aug_n: 2 # Number of RandAugment operations
+      rand_aug_m: 9 # Magnitude for RandAugment (0-30 typically, 7 is mild-moderate)
+
+  # gpu_augmentations: # Kornia based, run on GPU (disabled for this config)
+    # enable: false
+
+grad_cam: # Settings for Grad-CAM generation
+  enable: true
+  target_classes: ["MEL", "BCC"] # Class names (must be in label2idx_eval) to generate CAMs for
+  num_images_per_class: 2       # Number of true positive examples to visualize for each target class
+  log_at_global_epochs: [
+      0,                             # Beginning of Phase 1
+      12,                            # Approx. middle of Phase 1 (or adjust based on total P1 epochs)
+      25,                            # Beginning of Phase 2 (end of P1, if P1 is 25 epochs)
+      32,                            # Approx. middle of Phase 2 (e.g. 25 + 15/2)
+      39                             # End of training (e.g. 25 P1 + 15 P2 - 1 for 0-indexed)
+  ]
+  # Target layer for EfficientNet-B3 within CNNWithMetadata.
+  # This needs to be the name of a convolutional layer in the base_cnn_model.
+  # Examples for timm's EfficientNet:
+  # - 'base_cnn_model.conv_head' (the final 1x1 conv before pooling and classifier)
+  # - 'base_cnn_model.blocks[-1].conv_pwl' (last pointwise linear conv in the last block)
+  # - 'base_cnn_model.blocks[-1].act2' (activation after last depthwise conv in last block)
+  # You might need to inspect print(model.base_cnn_model) or model.base_cnn_model.named_modules() to find a suitable layer.
+  target_layer_name_base: "base_cnn_model.conv_head"
+  # grad_cam_method: "EigenCAM" # "GradCAM", "HiResCAM", "GradCAMPlusPlus", "EigenCAM", "EigenGradCAM" etc. (EigenCAM is default in script)
+
+paths:
+  project_root: "." # Optional: Define if paths below are relative to a specific project root
+  labels_csv: "splits/training/labels.csv" # Path to your main labels CSV with fold information
+  train_root: "splits/training"            # Root directory where 'dataset' subfolders from CSV are located
+  meta_csv: "splits/training/hot_one_meta.csv" # Path to your one-hot encoded metadata CSV
+  log_dir: "outputs/tensorboard_meta_effb3_adv" # Base directory for TensorBoard logs
+  ckpt_dir: "outputs/checkpoints_meta_effb3_adv" # Base directory for model checkpoints
+  grad_cam_output_dir: "outputs/grad_cam_meta_effb3_adv" # Directory to save Grad-CAM images
+
+# torch_compile: # For PyTorch 2.0+ model compilation (disabled for this config)
+#   enable: false
+
+tensorboard_logging:
+  enable: true
+  log_interval_batches_train: 0 # 0 means don't log per batch, only per epoch
+  log_interval_batches_val: 0
+  log_epoch_summary: true
+  log_lr: true
+  log_throughput: true
+  log_gpu_time_epoch: true
+  image_logging: # For logging input images to TensorBoard (can be a lot of data)
+    enable: false
+    # denormalize: true
+    # num_samples: 4
+    # log_at_epochs: [0, 9, 19]
+  profiler: # PyTorch profiler settings
+    enable: false
+    # profile_epoch: 1
+    # enable_batch_timing_always: false
+  memory_logging: # Log CUDA memory usage
+    enable: false

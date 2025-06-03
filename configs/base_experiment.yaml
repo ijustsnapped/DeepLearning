@@ -1,0 +1,152 @@
+# your_project_name/configs/base_experiment.yaml
+# Main configuration file for experiments
+
+# --- Experiment Setup ---
+experiment_setup:
+  experiment_name: "base_experiment" # Can be overridden by CLI, good for reference
+  seed: 21 # Random seed for reproducibility
+  device: "cuda"  # "cuda", "cpu", or "auto" for auto-detection
+  TQDM_NCOLS: 100 # Width of tqdm progress bars
+
+# --- Model Configuration ---
+model:
+  type: "efficientnet_b0" # Or any other model type from your factory
+  # Parameters specific to model loading if any (e.g., pretrained, force_reload_hub)
+  # These are often passed directly to the model factory if it expects them in its cfg.
+  # pretrained: True
+  # force_reload_hub: False
+
+# --- Training Loop Parameters ---
+training:
+  num_epochs: 50 # A more typical number of epochs
+  batch_size: 64
+  optimizer:
+    type: "AdamW"
+    lr: 0.0003 
+    weight_decay: 0.0001
+  scheduler:
+    type: "CosineAnnealingLR" # "StepLR" or "CosineAnnealingLR"
+    #step_size: 15
+    #gamma: 0.1
+    t_max: 50 # For CosineAnnealingLR (typically num_epochs)
+    min_lr: 0.0 # For CosineAnnealingLR
+  amp_enabled: True # Automatic Mixed Precision
+  accum_steps: 2    # Gradient accumulation steps
+  val_interval: 5   # Validate every N epochs
+  model_selection_metric: "mean_optimal_sensitivity" # Options: "macro_auc", "mean_optimal_f1", "mean_optimal_sensitivity"
+  save_optimal_thresholds: True      # If True and metric is F1/Sensitivity, save thresholds with best model
+  early_stopping_patience: 10
+  ema_decay: 0.999 # Set to 0 or remove/comment to disable EMA
+  use_ema_for_val: True
+  freeze_epochs: 0
+  backbone_lr_mult: 0.1
+  loss:
+    type: "focal_ce_loss" # Options: "focal_ce_loss", "cross_entropy", "weighted_cross_entropy", "ldam_loss"
+    # Focal Loss specific
+    focal_alpha: 1.0
+    focal_gamma: 2.0
+    # Weighted Cross Entropy specific
+    wce_k_factor: 1.0 # k in (N/Ni)^k. Used if loss.type is "weighted_cross_entropy".
+    # LDAM Loss specific
+    ldam_max_margin: 0.5
+    ldam_use_effective_number_margin: True
+    ldam_effective_number_beta: 0.999
+  drw_schedule_epochs: [30, 40] # Example: [30, 40] for a 50 epoch schedule. Empty means no DRW.
+                          # DRW will override WCE initial weights if both are active.
+  pauc_max_fpr: 0.2
+
+# --- Data Handling & Augmentations ---
+data:
+  num_workers: 8
+  prefetch_factor: 4 # Number of batches to prefetch by each worker
+  sampler:
+    type: "default" # Options: "class_balanced_sqrt", "class_balanced_sqrt" !!!
+  # --- CPU Augmentations (applied by DataLoader workers) ---
+  cpu_augmentations:
+    resize: 256
+    crop_size: 224
+    norm_mean: [0.485, 0.456, 0.406]
+    norm_std: [0.229, 0.224, 0.225]
+    train: # THIS IS THE CORRECTED AND ONLY 'train:' BLOCK
+      # 1. Random Flipping
+      random_horizontal_flip_p: 0.5
+      random_vertical_flip_p: 0.0 # Set > 0 to enable vertical flip
+
+      # 2. Random Affine (for Rotate, Scale, Shear)
+      affine_degrees: 15            # Target: Rotate +/-15°
+      affine_translate: [0.05, 0.05] # Max translation fraction
+      affine_scale_range: [0.9, 1.1] # Min and Max scaling factor
+      affine_shear_degrees: 10      # Max shear angle (+/- degrees)
+      # affine_fill: 0              # Optional: Pixel fill value
+
+      # 3. ColorJitter 0.1
+      color_jitter_brightness: 0.1  # Max delta for brightness
+      color_jitter_contrast: 0.1    # Max delta for contrast
+      color_jitter_saturation: 0.1  # Max delta for saturation
+      color_jitter_hue: 0.1         # Max delta for hue (e.g., range [-0.1, 0.1])
+
+      # 4. RandAugment
+      rand_aug_n: 2
+      rand_aug_m: 9
+      
+  # --- GPU Augmentations ---
+  # This section is for Kornia based GPU augmentations.
+  # Kept for structure, but the simplified strategy above focuses on CPU first.
+  gpu_augmentations:
+    enable: False
+    pipeline: [] # Example: [{name: "RandomHorizontalFlipGPU", params: {p: 0.5}}]
+
+# --- Paths Configuration ---
+paths:
+  # project_root: "." # Optional: Define a project root.
+  labels_csv: "../splits/training/labels.csv"
+  train_root: "../splits/training"
+  log_dir: "../outputs/tensorboard"
+  ckpt_dir: "../outputs/checkpoints"
+
+# --- PyTorch Compile (torch.compile) ---
+torch_compile:
+  enable: False # Set to True to try PyTorch 2.0+ model compilation
+  mode: "default"
+  # fullgraph: False
+  # dynamic: False
+  # backend: "inductor"
+
+# --- TensorBoard Logging ---
+tensorboard_logging:
+  enable: True
+  log_interval_batches_train: 50
+  log_interval_batches_val: 10
+  log_epoch_summary: True
+  log_lr: True
+  log_throughput: True
+  log_gpu_time_epoch: True
+  image_logging:
+    enable: False
+    num_samples: 4
+    denormalize: True
+    log_at_epochs: [0, 25, 49] # Example for 50 epochs
+    # log_interval_epochs: 0 # Alternative: Log every N epochs (0 to disable)
+    log_train_input: True
+    log_val_input: True
+    # log_val_predictions: False # For segmentation/detection tasks
+  # PyTorch Profiler
+  profiler:
+    enable: False
+    profile_epoch: 1 # Which epoch to profile
+    wait_steps: 5
+    warmup_steps: 5
+    active_steps: 10
+    repeat_cycles: 0
+    record_shapes: True
+    profile_memory: True
+    with_stack: True
+    # with_flops: False
+    sort_by: "self_cuda_time_total"
+    row_limit: 20
+    export_chrome_trace_manual: False
+  # GPU Memory Logging
+  memory_logging:
+    enable: True
+    log_interval_batches: 100
+    log_epoch_summary: True

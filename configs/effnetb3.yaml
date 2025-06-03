@@ -1,0 +1,142 @@
+# config_effb3_progressive.yaml
+experiment_setup:
+  experiment_name: "effb3_BCE_progressive_fold_run"
+  seed: 42
+  device: "cuda" # or "mps" or "cpu"
+  TQDM_NCOLS: 120 # Width of tqdm progress bars
+
+model:
+  type: "efficientnet_b3" # Use EfficientNet-B3
+  pretrained: true
+  # numClasses is set by the script based on data
+
+training:
+  num_epochs: 50           # Total epochs
+  batch_size: 32
+  freeze_epochs: 5         # Number of initial epochs to keep the backbone frozen
+                           # During these epochs, only the classifier head is trained.
+  backbone_lr_mult: 0.1    # Multiplier for backbone learning rate when unfrozen (e.g., 0.1 * main_lr)
+
+  optimizer:
+    type: "AdamW"
+    lr: 0.001              # Initial learning rate for the classifier head
+    weight_decay: 0.0001
+
+  scheduler:
+    type: "CosineAnnealingLR"
+    t_max: 25              # Corresponds to total num_epochs
+    min_lr: 0.000001
+
+  loss:
+    type: "ldam_loss" # Or "focal_ce_loss", "ldam_loss", "weighted_cross_entropy"
+    # focal_alpha: 1.0    # If using focal_ce_loss
+    # focal_gamma: 2.0    # If using focal_ce_loss
+    ldam_max_margin: 0.5
+    ldam_use_effective_number_margin: True
+    ldam_effective_number_beta: 0.999
+   # Example: [30, 40] for a 50 epoch schedule. Empty means no DRW.
+                          # DRW will override WCE initial weights if both are active.
+
+  amp_enabled: true
+  accum_steps: 2
+  val_interval: 1
+  val_metrics_heavy_interval: 24 # e.g., run heavy metrics on the last epoch
+
+  model_selection_metric: "f1_macro_post_hoc_unk" # Metric to select the best model
+  exclude_unk_from_training_model: true
+  save_optimal_thresholds_from_pr: true
+
+  # post_hoc_unk_threshold: 0.20
+  unk_label_string: null
+
+  early_stopping_patience: 7
+  ema_decay: 0.0 # 0.999 or similar if you want to use EMA
+  use_ema_for_val: false
+
+  drw_schedule_epochs: [30, 40] # e.g. [15, 20] if using LDAM with Deferred Re-Weighting
+  pauc_max_fpr: 0.2
+
+data:
+  num_workers: 6
+  prefetch_factor: 4
+  persistent_workers: true # Set to true if num_workers > 0
+  image_loader: "pil"      # "pil" or "opencv"
+  enable_ram_cache: false  # Cache images in RAM (careful with memory)
+
+  # known_training_labels: ["classA", "classB", ...] # Optional: if you want to explicitly define model classes
+  # dataset_args: {} # For any custom args to FlatDataset
+
+  sampler:
+    type: "class_balanced_sqrt" # or null/None for no special sampler (class_balanced_sqrt)
+
+  cpu_augmentations:
+    resize: 380 # B3 typical input size is 300, resize slightly larger for random crop
+    crop_size: 300
+    norm_mean: [0.485, 0.456, 0.406] # ImageNet mean
+    norm_std:  [0.229, 0.224, 0.225] # ImageNet std
+    train: # Training specific augmentations
+      random_horizontal_flip_p: 0.5
+      random_vertical_flip_p: 0.0 # Usually not for general images unless appropriate
+      affine_degrees: 15
+      affine_translate: [0.1, 0.1] # fraction of image size
+      affine_scale_range: [0.85, 1.15]
+      affine_shear_degrees: 10
+      # affine_fill: 0 # Integer fill value for RandomAffine
+      color_jitter_brightness: 0.2
+      color_jitter_contrast: 0.2
+      color_jitter_saturation: 0.2
+      color_jitter_hue: 0.1
+      rand_aug_n: 2 # Number of RandAugment operations
+      rand_aug_m: 9 # Magnitude for RandAugment (0-30 typically)
+
+  gpu_augmentations: # Kornia based, run on GPU
+    enable: false
+    # pipeline:
+    #   - name: "RandomHorizontalFlipGPU"
+    #     params: {p: 0.5}
+    #   - name: "ColorJitterGPU"
+    #     params: {brightness: [0.8, 1.2], contrast: [0.8, 1.2], saturation: [0.8, 1.2], hue: [-0.1, 0.1]}
+
+paths:
+  project_root: "." # Optional: if paths below are relative to a specific project root
+  labels_csv: "splits/training/labels.csv" # Path to your main labels CSV
+  train_root: "splits/training"            # Root directory for images
+  log_dir: "outputs/tensorboard_effb3_progressive"
+  ckpt_dir: "outputs/checkpoints_effb3_progressive"
+
+torch_compile: # For PyTorch 2.0+ model compilation
+  enable: false
+  # mode: "default" # or "reduce-overhead", "max-autotune"
+  # dynamic: false
+  # fullgraph: false
+
+tensorboard_logging:
+  enable: true
+  log_interval_batches_train: 0 # 0 means don't log, >0 means log every N batches
+  log_interval_batches_val: 0
+  log_epoch_summary: true
+  log_lr: true
+  log_throughput: true
+  log_gpu_time_epoch: true
+  image_logging:
+    enable: false
+    # denormalize: true
+    # num_samples: 4
+    log_at_epochs: [0, 20, 30] # List of epochs to log images, or single int
+    # log_train_input: true
+    # log_val_input: true
+  profiler:
+    enable: false
+    # profile_epoch: 1 # Epoch to run the PyTorch profiler on
+    # wait_steps: 1
+    # warmup_steps: 1
+    # active_steps: 3
+    # repeat_cycles: 0 # 0 means one full cycle
+    # record_shapes: true
+    # profile_memory: true
+    # with_stack: false
+    # enable_batch_timing_always: false # If true, logs GPU time per batch even if profiler epoch is not active
+  memory_logging:
+    enable: false # Log CUDA memory usage
+    # log_interval_batches: 100 # Log memory per N batches
+    # log_epoch_summary: true # Log peak memory per epoch

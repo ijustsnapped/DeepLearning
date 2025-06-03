@@ -1,0 +1,172 @@
+# Adapted Configuration for train_single_fold_with_meta_fully_updated.py
+# Based on config_cv_final_optimized_fully_commented.yaml
+
+# --- Experiment Setup ---
+experiment_setup:
+  experiment_name: "meta_effb0_LDAM_fold_run" # Descriptive name for this single fold meta run
+  seed: 42
+  device: "cuda"
+  TQDM_NCOLS: 120
+
+# --- Model Configuration ---
+model:
+  base_cnn_type: "efficientnet_b0" # Type of the base CNN (matches original 'type')
+  pretrained_cnn: true             # Use pretrained weights for the base CNN (matches original 'pretrained')
+  # numClasses for the model's output layer is set by the script
+
+  meta_head_args: # Arguments for the CNNWithMetadata's metadata processing head
+    # metadata_input_dim is set by the script from the dataset
+    meta_mlp_hidden_dim: 128     # Example: Hidden units in MLP for metadata
+    meta_mlp_output_dim: 64      # Example: Output features from metadata MLP
+    meta_dropout_p: 0.3          # Example: Dropout in metadata MLP
+    post_concat_dim: 512         # Example: Hidden units in FC layer after concatenating image & meta features
+    post_concat_dropout_p: 0.4   # Example: Dropout after concatenation
+
+# --- Training Loop Parameters (Shared & Phase 1 - Joint Training) ---
+training: # These settings primarily apply to Phase 1, or are global if not overridden by meta_tuning
+  num_epochs: 25             # Epochs for Phase 1 (Joint Training) - ADJUST AS NEEDED
+  batch_size: 32
+
+  optimizer:
+    type: "AdamW"
+    lr: 0.0003
+    weight_decay: 0.0001
+
+  scheduler:
+    type: "CosineAnnealingLR"
+    t_max: 25                 # Corresponds to Phase 1 num_epochs
+    min_lr: 0.000001
+
+  amp_enabled: true
+  accum_steps: 2
+  val_interval: 1
+  val_metrics_heavy_interval: 24 # e.g., last epoch of phase 1 (if num_epochs=25)
+
+  model_selection_metric: "f1_macro_post_hoc_unk"
+  exclude_unk_from_training_model: true # IMPORTANT: For UNK handling
+
+  save_optimal_thresholds_from_pr: true
+
+  #post_hoc_unk_threshold: 0.20
+  unk_label_string: null
+
+  early_stopping_patience: 7 # For Phase 1
+  ema_decay: 0.0
+  use_ema_for_val: false
+  # freeze_epochs and backbone_lr_mult from original are less directly applicable here due to two-phase training
+  # Freezing for Phase 2 is handled by model.set_base_cnn_trainable(False) in script
+
+  loss:
+    type: "ldam_loss"     # CHANGED: As per your request
+    # --- Parameters for Focal CE Loss ---
+    # focal_alpha: 1.0
+    # focal_gamma: 2.0
+
+    # --- Parameters for LDAM Loss (if type: "ldam_loss") ---
+    ldam_params: # Nest LDAM params under a sub-key for clarity if script expects it, or flatten
+      max_margin: 0.5
+      scale: 30.0
+      use_effective_number_margin: true
+      effective_number_beta: 0.999
+
+  drw_schedule_epochs: []   # e.g., [15] for a 25 epoch Phase 1 if using DRW with LDAM
+  pauc_max_fpr: 0.2
+
+# --- Meta-Tuning Phase Parameters (Phase 2) ---
+meta_tuning:
+  enable: true              # Set to true to run Phase 2
+  num_epochs: 15            # Epochs for Phase 2 (Meta Head Fine-tuning)
+  batch_size: 64            # Can be different from Phase 1
+  
+  optimizer: # Optimizer settings specific to Phase 2
+    type: "AdamW"
+    lr: 0.0001              # Typically a smaller LR for fine-tuning
+    weight_decay: 0.00001
+  
+  scheduler: # Scheduler settings specific to Phase 2
+    type: "CosineAnnealingLR"
+    t_max: 15               # Corresponds to Phase 2 num_epochs
+    min_lr: 0.0000001
+
+  val_interval: 1
+  early_stopping_patience: 5
+  # accum_steps for phase 2 can also be set here if different from main training's accum_steps
+
+# --- Data Handling & Augmentations ---
+data:
+  num_workers: 6
+  prefetch_factor: 4
+  persistent_workers: true
+  image_loader: "pil"
+  enable_ram_cache: false
+
+  meta_features_names: [  # ADDED: Based on your provided CSV header
+    "age_zscore",
+    "anatom_site_general_anterior torso",
+    "anatom_site_general_head/neck",
+    "anatom_site_general_lateral torso",
+    "anatom_site_general_lower extremity",
+    "anatom_site_general_oral/genital",
+    "anatom_site_general_palms/soles",
+    "anatom_site_general_posterior torso",
+    "anatom_site_general_upper extremity",
+    "anatom_site_general_nan",
+    "sex_female",
+    "sex_male",
+    "sex_nan"
+  ]
+  meta_augmentation_p: 0.0 
+  meta_nan_fill_value: 0.0 
+
+  sampler:
+    type: "class_balanced_sqrt" # Sampler for training.
+
+  cpu_augmentations:
+    resize: 256
+    crop_size: 224
+    norm_mean: [0.485, 0.456, 0.406]
+    norm_std:  [0.229, 0.224, 0.225]
+    train:
+      random_horizontal_flip_p: 0.5
+      random_vertical_flip_p: 0.0
+      affine_degrees: 10
+      affine_translate: [0.05, 0.05]
+      affine_scale_range: [0.9, 1.1]
+      affine_shear_degrees: 5
+      color_jitter_brightness: 0.1
+      color_jitter_contrast: 0.1
+      color_jitter_saturation: 0.1
+      color_jitter_hue: 0.05
+      rand_aug_n: 2
+      rand_aug_m: 9
+
+  gpu_augmentations:
+    enable: false
+
+  # dataset_args: {} # If FlatDatasetWithMeta takes additional specific args
+
+# --- Paths Configuration ---
+paths:
+  project_root: "." # Define if paths below are relative to a specific project root different from config file dir
+  labels_csv: "splits/training/labels.csv" # Path relative to where script is run or project_root
+  train_root: "splits/training"
+  log_dir: "outputs/tensorboard_cv_light_corrected"
+  ckpt_dir: "outputs/checkpoints_cv_light_corrected"
+  meta_csv: "splits/training/hot_one_meta.csv" # Path to metadata CSV file
+
+# --- PyTorch Compile (torch.compile) ---
+torch_compile:
+  enable: false
+
+# --- TensorBoard Logging ---
+tensorboard_logging:
+  enable: true
+  log_interval_batches_train: 0
+  log_interval_batches_val: 0
+  log_epoch_summary: true
+  log_lr: true
+  log_throughput: true
+  log_gpu_time_epoch: true
+  image_logging: {enable: false}
+  profiler: {enable: false, profile_epoch: 1, enable_batch_timing_always: False}
+  memory_logging: {enable: false}
