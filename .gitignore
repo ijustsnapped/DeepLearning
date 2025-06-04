@@ -5,3 +5,4 @@
 **/outputs/
 
 **/.venv/
+.venv/
