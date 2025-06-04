@@ -77,24 +77,28 @@ class LDAMLoss(nn.Module):
             self.margins = self.margins.to(logits.device)
 
         # Create one-hot targets and subtract margin for target classes
-        index = torch.zeros_like(logits, dtype=torch.uint8) # Use bool or uint8
-        index.scatter_(1, targets.data.view(-1, 1), 1)
+        index = torch.zeros_like(logits, dtype=torch.bool)
+        index.scatter_(1, targets.data.view(-1, 1), True)
         
         # Create margin tensor for subtraction
         # margin_sub = self.margins[index.bool()] # This would be [N], not what we want
         # We need to subtract m_j from logit_j for the target class j
         # So, construct a batch_margins tensor where only target class has its margin, others 0
         batch_margins = torch.zeros_like(logits)
-        batch_margins.scatter_(1, targets.data.view(-1,1), self.margins.repeat(logits.size(0),1)[index.bool()].view(-1,1))
+        batch_margins.scatter_(1, targets.data.view(-1, 1),
+                               self.margins.repeat(logits.size(0), 1)[index].view(-1, 1))
 
         x_m = logits - batch_margins # Subtract margin only from the target class logit
         
         # Standard cross-entropy after adjusting logits
         # Apply scaling factor s
-        output = torch.where(index.bool(), x_m, logits) # Use adjusted logits for target class, original for others
+        output = torch.where(index, x_m, logits)  # Use adjusted logits for target class, original for others
         
         log_probs = F.log_softmax(self.s * output, dim=1)
-        loss = F.nll_loss(log_probs, targets, weight=self.weight.to(logits.device) if self.weight is not None else None)
+        weight = self.weight
+        if weight is not None and weight.device != logits.device:
+            weight = weight.to(logits.device)
+        loss = F.nll_loss(log_probs, targets, weight=weight)
         
         return loss
 
@@ -102,7 +106,10 @@ class LDAMLoss(nn.Module):
         """Used by DRW schedule to update class weights."""
         if new_weights is not None:
             logger.info(f"LDAMLoss weights updated. New weights (first 5): {new_weights[:5]}")
-            self.weight = new_weights.float() # Ensure float
+            self.weight = new_weights.float()
+            # Keep weight on same device as margins for efficient forward pass
+            if self.margins.device != self.weight.device:
+                self.weight = self.weight.to(self.margins.device)
         else:
             logger.info("LDAMLoss weights reset (set to None).")
             self.weight = None

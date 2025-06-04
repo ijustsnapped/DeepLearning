@@ -18,7 +18,9 @@ class FlatDataset(Dataset):
     def __getitem__(self, idx: int):
         path, label = self.samples[idx]
         try:
-            img = Image.open(path).convert("RGB")
+            # Use context manager to ensure file handles are released promptly.
+            with Image.open(path) as img:
+                img = img.convert("RGB")
         except UnidentifiedImageError:
             # Consider logging this error or returning a placeholder
             # For now, raising an error as in the original script
