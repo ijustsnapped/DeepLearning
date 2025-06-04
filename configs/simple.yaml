@@ -1,0 +1,56 @@
+experiment_setup:
+  seed: 123
+  device: "cuda"             # or "cpu" 
+  log_interval_batches_train: 50
+
+paths:
+  project_root: "."          # or your project root
+  labels_csv: "splits/labels.csv"
+  train_root: "splits/training"
+  log_dir: "outputs/tb_base"
+  ckpt_dir: "outputs/ckpt_base"
+
+data:
+  cpu_augmentations:
+    resize:       256
+    crop_size:    224
+    norm_mean:    [0.485, 0.456, 0.406]
+    norm_std:     [0.229, 0.224, 0.225]
+  image_loader:  "pil"
+  enable_ram_cache: false
+  num_workers:   4
+
+model:
+  type: "efficientnet_b0"
+  pretrained: true
+  # numClasses gets filled in by script automatically
+
+training:
+  num_epochs:    20
+  batch_size:    32
+  val_interval:  1
+  early_stopping_patience: 5
+  accum_steps:   1
+  backbone_lr_mult: 0.1
+  freeze_epochs:    2
+  ema_decay:        0.999
+  amp_enabled:      true
+
+  optimizer:
+    lr:         1e-3
+    weight_decay: 1e-4
+
+  scheduler:
+    min_lr:     1e-6
+
+  loss:
+    type: "ldam"
+    ldam_params:
+      max_margin: 0.5
+      use_effective_number_margin: true
+      effective_number_beta: 0.999
+      scale: 30.0
+    drw_schedule_epochs: [5, 10]   # at epochs 5 and 10, update LDAM weights
+
+tensorboard_logging:
+  enable: true
