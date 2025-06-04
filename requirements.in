@@ -1,0 +1,17 @@
+# requirements.in
+
+torch>=1.10
+torchvision>=0.11
+timm
+kornia
+pandas
+numpy
+tqdm
+scikit-learn
+torchmetrics
+matplotlib
+opencv-python
+PyYAML
+pytorch-grad-cam
+Pillow
+tensorboard
