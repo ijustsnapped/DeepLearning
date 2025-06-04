@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
 import argparse
 from pathlib import Path
