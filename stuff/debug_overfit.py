@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 import os
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0' # If you still need this
 
 import argparse
 import pandas as pd

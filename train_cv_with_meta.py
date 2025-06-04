@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0' # Suppress oneDNN INFO messages
 
 import argparse
 from pathlib import Path
@@ -706,7 +705,6 @@ def main():
             exp_name_for_files=args.exp_name, device=device
         )
         fold_primary_metric_results.append(best_fold_metric_val)
-        if device.type == 'cuda': torch.cuda.empty_cache()
 
     # --- Summarize CV Results ---
     # (Same as original, using fold_primary_metric_results)

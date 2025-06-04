@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
 import argparse
 from pathlib import Path
@@ -521,7 +520,6 @@ def main():
             exp_name_for_files=args.exp_name, device=device
         )
         fold_primary_metric_results.append(best_fold_metric_val)
-        if device.type == 'cuda': torch.cuda.empty_cache()
     
     # ... (Summarize CV results as before) ...
     chosen_metric_name_summary = cfg.get("training",{}).get("model_selection_metric", "macro_auc").lower()

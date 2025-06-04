@@ -5,16 +5,29 @@ import torch
 import yaml
 from pathlib import Path
 
-def set_seed(seed: int = 42):
-    """Sets the seed for reproducibility."""
+def set_seed(seed: int = 42, *, deterministic: bool = False) -> None:
+    """Sets random seeds and controls CuDNN deterministic settings.
+
+    Parameters
+    ----------
+    seed:
+        Random seed to use.
+    deterministic:
+        When ``True`` forces deterministic CuDNN algorithms and disables
+        benchmarking. This ensures reproducibility at the cost of potential
+        performance loss. ``False`` (default) enables CuDNN benchmarking for
+        better speed when input sizes are constant.
+    """
+
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed) # if using multi-GPU
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False # Can impact performance, set to True if input sizes don't vary
+        torch.cuda.manual_seed_all(seed)
+
+    torch.backends.cudnn.deterministic = deterministic
+    torch.backends.cudnn.benchmark = not deterministic
 
 def load_config(config_path: str | Path) -> dict:
     """Loads a YAML configuration file safely."""
