@@ -43,8 +43,12 @@ class ClassBalancedSampler(torch.utils.data.sampler.Sampler):
                            "This can be slow. Consider adding a 'samples' or 'targets' attribute or a 'get_labels()' method to your dataset.")
             labels = [dataset[i][1] for i in range(len(dataset))]
 
-        if not labels:
-            raise ValueError("Could not extract labels from the dataset for ClassBalancedSampler.")
+        # Using `if not labels` can raise a ValueError for numpy arrays due to
+        # ambiguous truth value.  Explicitly check for None/length to be safe.
+        if labels is None or len(labels) == 0:
+            raise ValueError(
+                "Could not extract labels from the dataset for ClassBalancedSampler."
+            )
 
         class_counts = Counter(labels)
         num_classes = len(class_counts)
