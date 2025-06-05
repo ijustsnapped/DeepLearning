@@ -1,0 +1,150 @@
+# configs/meta_experiment.yaml
+
+experiment_setup:
+  experiment_name: "meta_effb0_two_phase"
+  seed: 42
+  device: "cuda"
+  TQDM_NCOLS: 120
+
+model:
+  base_cnn_type: "efficientnet_b0"
+  pretrained_cnn: true
+
+  # The script will override metadata_input_dim_runtime at runtime:
+  meta_head_args:
+    # In the paper: two 256‐unit layers with BN→ReLU→Dropout(0.4)
+    # Suppose CNNWithMetadata’s constructor expects these keys:
+    meta_mlp_hidden_dim: 256
+    meta_mlp_output_dim: 256    # second layer’s output
+    meta_dropout_p: 0.4
+    post_concat_dim: 1024     # after concatenation
+    post_concat_dropout_p: 0.4
+
+training:
+  # PHASE 1 joint training
+  num_epochs: 50
+  batch_size: 32
+
+  optimizer:
+    type: "AdamW"
+    lr: 0.0003
+    weight_decay: 0.0001
+
+  scheduler:
+    type: "CosineAnnealingLR"
+    t_max: 50
+    min_lr: 1e-6
+
+  amp_enabled: true
+  accum_steps: 2
+  val_interval: 1
+  val_metrics_heavy_interval: 49  # only compute heavy metrics near last epoch
+
+  model_selection_metric: "mean_optimal_sensitivity"
+  exclude_unk_from_training_model: true
+
+  save_optimal_thresholds_from_pr: true
+
+  unk_label_string: "UNK"
+  post_hoc_unk_threshold: 0.2
+
+  early_stopping_patience: 10
+  ema_decay: 0.0
+  use_ema_for_val: false
+
+  loss:
+    type: "cross_entropy"
+
+  drw_schedule_epochs: []
+  pauc_max_fpr: 0.2
+
+meta_tuning:
+  enable: true
+  num_epochs: 50
+  batch_size: 20
+
+  optimizer:
+    type: "AdamW"
+    lr: 1e-5
+    weight_decay: 1e-5
+
+  scheduler:
+    type: "CosineAnnealingLR"
+    t_max: 50
+    min_lr: 1e-7
+
+  val_interval: 1
+  early_stopping_patience: 5
+
+data:
+  num_workers: 6
+  prefetch_factor: 4
+  persistent_workers: true
+  image_loader: "pil"
+  enable_ram_cache: false
+
+  meta_features_names:
+    - age_zscore
+    - anatom_site_general_anterior torso
+    - anatom_site_general_head/neck
+    - anatom_site_general_lateral torso
+    - anatom_site_general_lower extremity
+    - anatom_site_general_oral/genital
+    - anatom_site_general_palms/soles
+    - anatom_site_general_posterior torso
+    - anatom_site_general_upper extremity
+    - anatom_site_general_nan
+    - sex_female
+    - sex_male
+    - sex_nan
+
+  meta_augmentation_p: 0.1
+  meta_nan_fill_value: 0.0
+
+  sampler:
+    type: "class_balanced_sqrt"
+
+  cpu_augmentations:
+    resize: 256
+    crop_size: 224
+    norm_mean: [0.485, 0.456, 0.406]
+    norm_std: [0.229, 0.224, 0.225]
+    train:
+      random_horizontal_flip_p: 0.5
+      random_vertical_flip_p: 0.0
+      affine_degrees: 10
+      affine_translate: [0.05, 0.05]
+      affine_scale_range: [0.9, 1.1]
+      affine_shear_degrees: 5
+      color_jitter_brightness: 0.1
+      color_jitter_contrast: 0.1
+      color_jitter_saturation: 0.1
+      color_jitter_hue: 0.05
+      rand_aug_n: 2
+      rand_aug_m: 9
+
+  gpu_augmentations:
+    enable: false
+
+paths:
+  project_root: "."
+  labels_csv: "splits/training/labels.csv"
+  train_root: "splits/training"
+  log_dir: "outputs/tensorboard_meta"
+  ckpt_dir: "outputs/checkpoints_meta"
+  meta_csv: "splits/training/hot_one_meta.csv"
+
+torch_compile:
+  enable: false
+
+tensorboard_logging:
+  enable: true
+  log_interval_batches_train: 0
+  log_interval_batches_val: 0
+  log_epoch_summary: true
+  log_lr: true
+  log_throughput: true
+  log_gpu_time_epoch: true
+  image_logging: {enable: false}
+  profiler: {enable: false}
+  memory_logging: {enable: false}

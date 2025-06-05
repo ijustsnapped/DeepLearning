@@ -1,14 +1,13 @@
 #!/usr/bin/env python
 # train_single_fold.py
 #
-# Single‐fold trainer with full YAML‐driven data & training options,
+# Single-fold trainer with full YAML-driven data & training options,
 # including optional ClassBalancedSampler, LDAM+DRW, EMA, AMP, TensorBoard, etc.
 
 """
 usage: train_single_fold.py [-h] [--config_file CONFIG_FILE] [--config_dir CONFIG_DIR]
                             [--seed SEED] --fold_id FOLD_ID
                             exp_name
-
 """
 
 from __future__ import annotations
@@ -17,13 +16,13 @@ import os
 os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
 
 import argparse
-import time
 import copy
 import logging
 import sys
 from datetime import datetime
 from pathlib import Path
 
+import cv2
 import pandas as pd
 import numpy as np
 import torch
@@ -58,8 +57,6 @@ from losses.custom_losses import LDAMLoss
 
 import matplotlib.pyplot as plt
 
-
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
@@ -67,6 +64,103 @@ logging.basicConfig(
     force=True,
 )
 logger = logging.getLogger(__name__)
+
+
+def overlay_heatmap_on_image(
+    image: np.ndarray, heatmap: np.ndarray, alpha: float = 0.4
+) -> np.ndarray:
+    """
+    Overlay a single-channel heatmap onto a color image.
+    
+    image: [H, W, 3] float32 in [0..1]
+    heatmap: [h, w] float32 in [0..1]
+    alpha: blending factor
+    Returns: [H, W, 3] float32 in [0..1]
+    """
+    # Resize heatmap to match image size
+    h_img, w_img = image.shape[:2]
+    heatmap_resized = cv2.resize(heatmap, (w_img, h_img))
+    # Convert to uint8 and apply a colormap
+    heatmap_uint8 = np.uint8(255 * heatmap_resized)
+    heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
+    heatmap_color = heatmap_color.astype(np.float32) / 255.0  # [H, W, 3] in [0..1]
+    # Blend heatmap with the original image
+    overlay = heatmap_color * alpha + image
+    # Re-normalize if necessary
+    max_val = overlay.max()
+    if max_val > 1.0:
+        overlay = overlay / max_val
+    return overlay
+
+
+class SimpleGradCAM:
+    def __init__(self, model: torch.nn.Module, target_layer_name: str):
+        """
+        model: your CNN (or ViT) whose final convolutional layer is named `target_layer_name`.
+        target_layer_name: a string like "features.4" or "blocks.11.norm1" depending on architecture.
+        """
+        self.model = model
+        self.target_layer_name = target_layer_name
+        self.activations: torch.Tensor | None = None
+        self.gradients: torch.Tensor | None = None
+        self._register_hooks()
+
+    def _find_module(self, name: str) -> torch.nn.Module:
+        """ Recursively walk model.named_modules() to find the submodule with given name. """
+        for module_name, module in self.model.named_modules():
+            if module_name == name:
+                return module
+        raise ValueError(f"Could not find layer '{name}' in model.")
+
+    def _hook_activations(self, module, input, output):
+        # output is feature‐map: shape [B, C, H, W]
+        self.activations = output.detach()
+
+    def _hook_gradients(self, module, grad_in, grad_out):
+        # grad_out[0] has gradient of the activation: shape [B, C, H, W]
+        self.gradients = grad_out[0].detach()
+
+    def _register_hooks(self):
+        target_module = self._find_module(self.target_layer_name)
+        # forward hook to grab activations
+        target_module.register_forward_hook(self._hook_activations)
+        # backward hook to grab gradients (using full backward hook to avoid deprecation warning)
+        target_module.register_full_backward_hook(self._hook_gradients)
+
+    def __call__(self, input_tensor: torch.Tensor, class_idx: int) -> np.ndarray:
+        """
+        input_tensor: [1, 3, H, W], a single image (unsqueezed to batch=1).
+        class_idx: which output class to generate CAM for.
+        Returns: a heatmap of shape [H, W] in [0..1].
+        """
+        # Ensure previous activations/gradients are cleared
+        self.activations = None
+        self.gradients = None
+
+        self.model.zero_grad()
+        preds = self.model(input_tensor)  # [1, num_classes]
+        score = preds[0, class_idx]
+        score.backward(retain_graph=True)
+
+        # activations: [1, C, h, w]; gradients: [1, C, h, w]
+        grads = self.gradients[0]            # [C, h, w]
+        acts = self.activations[0]           # [C, h, w]
+
+        # global‐average‐pool the gradients over (h, w)
+        weights = grads.view(grads.size(0), -1).mean(dim=1)  # [C]
+
+        # weighted combination of feature maps
+        cam = (weights.view(-1, 1, 1) * acts).sum(dim=0)     # [h, w]
+        cam = F.relu(cam)                                    # zero out negatives
+
+        # normalize heatmap to [0,1]
+        cam_min, cam_max = cam.min(), cam.max()
+        if cam_max > cam_min:
+            cam = (cam - cam_min) / (cam_max - cam_min)
+        else:
+            cam = torch.zeros_like(cam)
+
+        return cam.cpu().numpy()  # numpy array [h, w] in [0,1]
 
 
 def _get_path_from_config(
@@ -87,7 +181,12 @@ def _get_path_from_config(
     return p.resolve()
 
 
-def generate_confusion_matrix_figure(true_labels: np.ndarray, pred_labels: np.ndarray, display_labels: list[str], title: str):
+def generate_confusion_matrix_figure(
+    true_labels: np.ndarray,
+    pred_labels: np.ndarray,
+    display_labels: list[str],
+    title: str
+) -> plt.Figure:
     cm = confusion_matrix(true_labels, pred_labels, labels=list(range(len(display_labels))))
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=display_labels)
     fig_s_base, fig_s_factor = 8, 0.6
@@ -214,7 +313,7 @@ def train_one_fold(
             p.requires_grad_(False)
         logger.info(f"[Fold {fold_id}] EMA enabled (decay={ema_decay})")
 
-    # ── Freeze / backbone‐LR logic ──
+    # ── Freeze / backbone-LR logic ──
     freeze_epochs = training_cfg.get("freeze_epochs", 0)
     backbone_lr_mult = training_cfg.get("backbone_lr_mult", 1.0)
     base_lr = optim_cfg.get("lr", 1e-3)
@@ -267,7 +366,7 @@ def train_one_fold(
             opt_groups.append({"params": head_params, "lr": base_lr})
         if back_params:
             opt_groups.append({"params": back_params, "lr": base_lr * backbone_lr_mult})
-        logger.info(f"[Fold {fold_id}] Diff LR: head@{base_lr}, backbone@{base_lr*backbone_lr_mult}")
+        logger.info(f"[Fold {fold_id}] Diff LR: head@{base_lr}, backbone@{base_lr * backbone_lr_mult}")
     else:
         opt_groups = [{"params": [p for p in model.parameters() if p.requires_grad], "lr": base_lr}]
 
@@ -293,23 +392,30 @@ def train_one_fold(
         min_lr = sched_cfg.get("min_lr", 0.0)
         scheduler = CosineAnnealingLR(optimizer, T_max=t_max, eta_min=min_lr)
 
-    # ── LDAM + DRW ──
+    # ── Choose loss (LDAM, focal CE, or vanilla CE) ──
     loss_type = loss_cfg.get("type", "cross_entropy").lower()
-    if loss_type != "ldam_loss":
-        raise ValueError(f"Trainer currently supports only 'ldam_loss'. Got '{loss_type}'.")
-    # Compute class counts on train_df→label2idx
-    counts = np.zeros(len(label2idx), dtype=int)
-    mapped = train_df["label"].map(label2idx)
-    vc = mapped.value_counts()
-    for idx, cnt in vc.items():
-        counts[idx] = int(cnt)
-
-    ldam_params = {
-        "max_margin": loss_cfg.get("ldam_max_margin", 0.5),
-        "use_effective_number_margin": loss_cfg.get("ldam_use_effective_number_margin", True),
-        "effective_number_beta": loss_cfg.get("ldam_effective_number_beta", 0.999),
-    }
-    criterion = LDAMLoss(class_counts=counts, **ldam_params).to(device)
+    if loss_type == "ldam_loss":
+        # Compute class counts on train_df→label2idx
+        counts = np.zeros(len(label2idx), dtype=int)
+        mapped = train_df["label"].map(label2idx)
+        vc = mapped.value_counts()
+        for idx, cnt in vc.items():
+            counts[idx] = int(cnt)
+        ldam_params = {
+            "max_margin": loss_cfg.get("ldam_max_margin", 0.5),
+            "use_effective_number_margin": loss_cfg.get("ldam_use_effective_number_margin", True),
+            "effective_number_beta": loss_cfg.get("ldam_effective_number_beta", 0.999),
+        }
+        criterion = LDAMLoss(class_counts=counts, **ldam_params).to(device)
+        # DRW schedule will update `criterion.weight` later
+    elif loss_type == "focal_ce_loss":
+        alpha = loss_cfg.get("focal_alpha", 1.0)
+        gamma = loss_cfg.get("focal_gamma", 2.0)
+        criterion = lambda logits, targets: focal_ce_loss(logits, targets, alpha=alpha, gamma=gamma)
+    elif loss_type == "cross_entropy":
+        criterion = nn.CrossEntropyLoss().to(device)
+    else:
+        raise ValueError(f"Unsupported loss type '{loss_type}'")
 
     drw_stage = 0
 
@@ -364,11 +470,11 @@ def train_one_fold(
                 gamma = sched_cfg.get("gamma", 0.1)
                 scheduler = StepLR(optimizer, step_size=step_size, gamma=gamma)
             else:
-                scheduler = CosineAnnealingLR(optimizer, T_max=(rem if rem>0 else 1), eta_min=sched_cfg.get("min_lr", 0.0))
+                scheduler = CosineAnnealingLR(optimizer, T_max=(rem if rem > 0 else 1), eta_min=sched_cfg.get("min_lr", 0.0))
             logger.info(f"[Fold {fold_id}] Unfroze at epoch {epoch}, reinitialized optimizer/scheduler.")
 
-        # DRW Weight update
-        if (drw_stage < len(drw_epochs)) and (epoch >= drw_epochs[drw_stage]):
+        # DRW Weight update (for LDAMLoss)
+        if loss_type == "ldam_loss" and (drw_stage < len(drw_epochs)) and (epoch >= drw_epochs[drw_stage]):
             beta = ldam_params["effective_number_beta"]
             eff_num = 1.0 - np.power(beta, counts)
             drw_w = (1.0 - beta) / np.maximum(eff_num, 1e-8)
@@ -377,7 +483,7 @@ def train_one_fold(
             criterion.update_weights(w_tensor)
             logger.info(f"[Fold {fold_id}] DRW at E{epoch} → weights (first5): {drw_w[:5]}")
             drw_stage += 1
-        elif (epoch == 0) and (drw_stage == 0):
+        elif (epoch == 0) and (drw_stage == 0) and loss_type == "ldam_loss":
             criterion.update_weights(None)
 
         # ── Train Loop ──
@@ -400,6 +506,9 @@ def train_one_fold(
                 if accum_steps > 1:
                     loss = loss / accum_steps
 
+                # Convert to probabilities for metrics
+                probs = F.softmax(logits, dim=1)
+
             scaler.scale(loss).backward()
 
             if ((batch_idx + 1) % accum_steps == 0) or ((batch_idx + 1) == len(train_loader)):
@@ -409,25 +518,30 @@ def train_one_fold(
                 if ema_model is not None:
                     update_ema(ema_model, model, ema_decay)
 
-            preds = logits.argmax(dim=1)
+            preds = probs.argmax(dim=1)
             correct = (preds == labels).sum().item()
             bs = labels.size(0)
-            running_loss += loss.item() * (bs if accum_steps == 1 else bs * accum_steps)
+            # Since CrossEntropyLoss is mean-reduced, multiply by batch size to accumulate total
+            scaling = accum_steps if accum_steps > 1 else 1
+            running_loss += loss.item() * bs * scaling
             running_correct += correct
             running_total += bs
 
+            avg_loss = running_loss / running_total if running_total > 0 else 0.0
+            avg_acc = running_correct / running_total if running_total > 0 else 0.0
+
             pbar.set_postfix({
-                "loss": f"{running_loss/running_total:.4f}" if running_total > 0 else "N/A",
-                "acc": f"{running_correct/running_total:.4f}" if running_total > 0 else "N/A"
+                "loss": f"{avg_loss:.4f}",
+                "acc": f"{avg_acc:.4f}"
             })
 
-            # Batch‐level TensorBoard logging
+            # Batch-level TensorBoard logging
             if writer and (tb_cfg.get("log_interval_batches_train", 0) > 0):
                 interval = tb_cfg["log_interval_batches_train"]
                 if (batch_idx + 1) % interval == 0:
                     step = epoch * len(train_loader) + batch_idx
-                    writer.add_scalar("Train/Loss_batch", running_loss / running_total, step)
-                    writer.add_scalar("Train/Acc_batch", running_correct / running_total, step)
+                    writer.add_scalar("Train/Loss_batch", avg_loss, step)
+                    writer.add_scalar("Train/Acc_batch", avg_acc, step)
 
         pbar.close()
         epoch_loss = running_loss / running_total if running_total > 0 else 0.0
@@ -450,7 +564,8 @@ def train_one_fold(
             val_loss = 0.0
             val_correct = 0
             val_total = 0
-            all_logits, all_true = [], []
+            all_logits: list[torch.Tensor] = []
+            all_true: list[torch.Tensor] = []
 
             with torch.no_grad():
                 pbar_v = tqdm(val_loader, desc=f"Fold {fold_id} E{epoch} Val", ncols=exp_setup_cfg.get("TQDM_NCOLS", 100), leave=False)
@@ -461,8 +576,9 @@ def train_one_fold(
                     with autocast(enabled=use_amp, device_type=device.type):
                         logits = eval_model(imgs)
                         loss = criterion(logits, labels)
+                        probs = F.softmax(logits, dim=1)
 
-                    preds = logits.argmax(dim=1)
+                    preds = probs.argmax(dim=1)
                     correct = (preds == labels).sum().item()
                     bs = labels.size(0)
 
@@ -473,9 +589,12 @@ def train_one_fold(
                     all_logits.append(logits.cpu())
                     all_true.append(labels.cpu())
 
+                    avg_val_loss = val_loss / val_total if val_total > 0 else 0.0
+                    avg_val_acc = val_correct / val_total if val_total > 0 else 0.0
+
                     pbar_v.set_postfix({
-                        "val_loss": f"{val_loss/val_total:.4f}" if val_total > 0 else "N/A",
-                        "val_acc": f"{val_correct/val_total:.4f}" if val_total > 0 else "N/A"
+                        "val_loss": f"{avg_val_loss:.4f}",
+                        "val_acc": f"{avg_val_acc:.4f}"
                     })
                 pbar_v.close()
 
@@ -487,20 +606,28 @@ def train_one_fold(
             all_true_cat = torch.cat(all_true, dim=0)
 
             # F1 (macro) on hard preds
-            f1_macro = F1Score(task="multiclass", num_classes=len(label2idx), average="macro")(all_probs.argmax(dim=1), all_true_cat).item()
+            f1_macro = F1Score(task="multiclass", num_classes=len(label2idx), average="macro")(
+                all_probs.argmax(dim=1), all_true_cat
+            ).item()
 
             try:
-                auroc_macro = AUROC(task="multiclass", num_classes=len(label2idx), average="macro")(all_probs, all_true_cat).item()
+                auroc_macro = AUROC(task="multiclass", num_classes=len(label2idx), average="macro")(
+                    all_probs, all_true_cat
+                ).item()
             except Exception:
                 auroc_macro = float("nan")
 
             try:
                 # pAUROC @ max_fpr
-                pauc = AUROC(task="multiclass", num_classes=len(label2idx), average="macro", max_fpr=pauc_max_fpr)(all_probs, all_true_cat).item()
+                pauc = AUROC(task="multiclass", num_classes=len(label2idx), average="macro", max_fpr=pauc_max_fpr)(
+                    all_probs, all_true_cat
+                ).item()
             except Exception:
                 pauc = float("nan")
 
-            sens_macro = Recall(task="multiclass", num_classes=len(label2idx), average="macro", zero_division=0)(all_probs.argmax(dim=1), all_true_cat).item()
+            sens_macro = Recall(task="multiclass", num_classes=len(label2idx), average="macro", zero_division=0)(
+                all_probs.argmax(dim=1), all_true_cat
+            ).item()
 
             if writer:
                 writer.add_scalar("Val/Loss_epoch", avg_val_loss, epoch)
@@ -516,6 +643,75 @@ def train_one_fold(
                 f"F1={f1_macro:.4f} AUROC={auroc_macro:.4f} Sens={sens_macro:.4f}"
             )
 
+            # ── IMAGE LOGGING with Grad-CAM ──
+            img_cfg = tb_cfg.get("image_logging", {})
+            if writer and img_cfg.get("enable", False) and (epoch in img_cfg.get("log_at_epochs", [])):
+                # a) Grab a small batch from val_loader
+                samples = next(iter(val_loader))
+                imgs_sample, labels_sample = (
+                    samples[0][: img_cfg.get("num_samples", 4)],
+                    samples[1][: img_cfg.get("num_samples", 4)],
+                )
+                imgs_sample = imgs_sample.to(device)  # [B, 3, H, W]
+                B = imgs_sample.size(0)
+
+                # b) Forward‐pass to get logits and pick predicted class (for computing Grad-CAM)
+                model_to_use = ema_model if (ema_model is not None and training_cfg.get("use_ema_for_val", True)) else model
+                model_to_use.eval()
+                with torch.no_grad():
+                    logits_sample = model_to_use(imgs_sample)      # [B, num_classes]
+                    probs_sample = F.softmax(logits_sample, dim=1) # [B, num_classes]
+                    preds_sample = probs_sample.argmax(dim=1)      # [B]
+
+                # c) Denormalize for visualization
+                if img_cfg.get("denormalize", True):
+                    mean = torch.tensor(cpu_aug["norm_mean"]).view(1, 3, 1, 1).to(device)
+                    std  = torch.tensor(cpu_aug["norm_std"]).view(1, 3, 1, 1).to(device)
+                    imgs_denorm = imgs_sample * std + mean        # still on GPU
+                else:
+                    imgs_denorm = imgs_sample
+
+                imgs_denorm = imgs_denorm.clamp(0, 1).cpu()  # move to CPU, shape [B,3,H,W]
+
+                # d) Prepare Grad-CAM helper (hook on “last_conv” layer)
+                #    — Make sure `"last_conv_layer"` matches your model’s layer name.
+                #    For EfficientNet-B0, you might do: target_layer = "blocks.6" or similar.
+                target_layer = training_cfg.get("gradcam_layer", "blocks.6")
+                gradcam = SimpleGradCAM(model_to_use, target_layer)
+
+                # e) For each sample, generate heatmap and overlay
+                overlays: list[np.ndarray] = []
+                for i in range(B):
+                    img_i = imgs_denorm[i].permute(1, 2, 0).numpy()     # [H, W, 3] in [0..1]
+                    class_idx = preds_sample[i].item()               # predicted class
+                    # Compute CAM for this one image (unsqueeze to [1,3,H,W])
+                    single = imgs_denorm[i].unsqueeze(0).to(device)
+                    heatmap = gradcam(single, class_idx)              # [h, w] in [0..1], np.ndarray
+
+                    # Overlay heatmap onto original
+                    overlay_i = overlay_heatmap_on_image(img_i, heatmap, alpha=0.4)  # [H,W,3]
+                    overlays.append(overlay_i)
+
+                # f) Stack overlays into a tensor [B, 3, H, W] for TensorBoard
+                overlays_np = np.stack(overlays, axis=0)            # [B, H, W, 3]
+                overlays_t = torch.from_numpy(overlays_np).permute(0, 3, 1, 2)  # [B,3,H,W]
+
+                # g) Log overlays under tag "Val/GradCAM_E{epoch}"
+                writer.add_images(f"Val/GradCAM_E{epoch}", overlays_t, global_step=epoch)
+
+                # h) (Optional) also write the raw inputs or text labels as before
+                #     If you still want the plain inputs:
+                writer.add_images(f"Val/RawInputs_E{epoch}", imgs_denorm, global_step=epoch)
+
+                # Optionally log predicted vs. true labels as text
+                for idx, (gt, pred) in enumerate(zip(labels_sample.cpu().tolist(), preds_sample.cpu().tolist())):
+                    writer.add_text(
+                        f"Val/Pred_E{epoch}",
+                        f"Index {idx}: GT={gt}, Pred={pred}",
+                        epoch * B + idx
+                    )
+            # ── end IMAGE LOGGING ──
+
             # Choose primary metric
             metric_map = {
                 "macro_auc": auroc_macro,
@@ -525,15 +721,14 @@ def train_one_fold(
             current_metric = metric_map.get(model_sel_metric, sens_macro)
 
             # Save thresholds from PR if requested and metric is F1 or sensitivity
-            opt_thresholds = {}
+            opt_thresholds: dict[int, float] = {}
             if save_thresh and (model_sel_metric in ["mean_optimal_f1", "mean_optimal_sensitivity"]):
-                # Compute per-class PR and pick threshold maximizing F1 or sensitivity
                 n_cls = len(label2idx)
                 pr_true = all_true_cat.numpy()
                 pr_probs = all_probs.numpy()
-                opt_vals, opt_sens_list = [], []
+                opt_vals: list[float] = []
+                opt_sens_list: list[float] = []
                 for cls_i in range(n_cls):
-                    # one‐hot for this class
                     onehot = (pr_true == cls_i).astype(int)
                     try:
                         p, r, t = precision_recall_curve(onehot, pr_probs[:, cls_i])
@@ -551,7 +746,6 @@ def train_one_fold(
                         opt_thresholds[cls_i] = 0.5
                         opt_vals.append(0.0)
                         opt_sens_list.append(0.0)
-                # If selecting by sensitivity, override current_metric accordingly
                 if model_sel_metric == "mean_optimal_sensitivity" and len(opt_sens_list) > 0:
                     current_metric = float(np.nanmean(opt_sens_list))
                 if writer:
@@ -562,7 +756,7 @@ def train_one_fold(
                 best_metric = current_metric
                 best_epoch = epoch
                 best_path = ckpt_dir / f"{exp_name}_fold{fold_id}_best.pt"
-                data_to_save = {
+                data_to_save: dict = {
                     "epoch": epoch,
                     "model_state_dict": (ema_model if (ema_model is not None and training_cfg.get("use_ema_for_val", True)) else model).state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
@@ -612,7 +806,7 @@ def train_one_fold(
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Single‐fold trainer (LDAM+DRW, EMA, full config).")
+    ap = argparse.ArgumentParser(description="Single-fold trainer (LDAM+DRW, EMA, full config).")
     ap.add_argument("exp_name", help="Experiment name (locates `<config_dir>/<exp_name>.yaml`).")
     ap.add_argument("--config_file", default=None, help="Path to YAML config.")
     ap.add_argument("--config_dir", default="configs", help="Dir for YAML configs.")

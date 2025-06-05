@@ -15,7 +15,7 @@ model:
 
 # --- Training Loop Parameters ---
 training:
-  num_epochs: 20
+  num_epochs: 40
   batch_size: 64
   optimizer:
     type: "AdamW"
@@ -23,7 +23,7 @@ training:
     weight_decay: 0.0001
   scheduler:
     type: "CosineAnnealingLR"
-    t_max: 20
+    t_max: 40
     min_lr: 0.0
   amp_enabled: True
   accum_steps: 2
@@ -31,18 +31,17 @@ training:
   model_selection_metric: "mean_optimal_sensitivity"
   save_optimal_thresholds: True
   early_stopping_patience: 10
-  ema_decay: 0.999
-  use_ema_for_val: True
+  ema_decay: 0
+  use_ema_for_val: False
   freeze_epochs: 0
   backbone_lr_mult: 0.1
 
   loss:
-    type: "ldam_loss"
-    ldam_max_margin: 0.5
-    ldam_use_effective_number_margin: True
-    ldam_effective_number_beta: 0.999
+    type: "cross_entropy"
+    focal_alpha: 0
+    focal_gamma: 0
 
-  drw_schedule_epochs: [30, 40]
+  drw_schedule_epochs: []    # Not used for focal loss
   pauc_max_fpr: 0.2
 
 # --- Data Handling & Augmentations ---
@@ -50,7 +49,7 @@ data:
   num_workers: 8
   prefetch_factor: 4
   sampler:
-    type: "default"       # Options: "default", "class_balanced_sqrt"
+    type: "class_balanced_sqrt"       # Options: "default", "class_balanced_sqrt"
 
   cpu_augmentations:
     resize: 256
@@ -90,7 +89,7 @@ torch_compile:
 # --- TensorBoard Logging ---
 tensorboard_logging:
   enable: True
-  log_interval_batches_train: 50
+  log_interval_batches_train: 40
   log_interval_batches_val: 10
   log_epoch_summary: True
   log_lr: True
@@ -98,12 +97,13 @@ tensorboard_logging:
   log_gpu_time_epoch: True
 
   image_logging:
-    enable: False
+    enable: True
     num_samples: 4
     denormalize: True
-    log_at_epochs: [0, 25, 49]
-    log_train_input: True
-    log_val_input: True
+    log_at_epochs: [2, 20, 39]    # whatever epochs you like
+    gradcam_layer: "blocks.6"    # <— pick the correct layer name for your model
+    log_train_input: False       # (optional)
+    log_val_input: False 
 
   profiler:
     enable: False
