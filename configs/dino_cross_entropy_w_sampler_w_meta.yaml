@@ -1,0 +1,174 @@
+# configs/dino_cross_entropy_w_sampler_w_meta.yaml
+
+# --- Experiment Setup ---
+experiment_setup:
+  experiment_name: "dinov2_vit_s14_ft"      # Name of the experiment
+  seed: 21                                  # Random seed for reproducibility
+  device: "cuda"                            # Use GPU if available
+  TQDM_NCOLS: 100                           # Width of tqdm progress bars
+
+# --- Model Configuration ---
+model:
+  MODEL_TYPE: "dino_vit_s14"                # Use DINOv2 ViT-S/14 from torch.hub :contentReference[oaicite:5]{index=5}
+  num_classes: 8                            # Number of target classes
+  force_reload_hub: False                   # Set True if you want to force redownload
+
+# --- Training Loop Parameters (Full Fine‐Tuning Phase) ---
+training:
+  num_epochs: 24                            # 24 epochs of full fine-tuning (≈0.6×40) 
+  batch_size: 64                            # Batch size per GPU (adjust based on memory) 
+
+  optimizer:
+    type: "AdamW"                           # AdamW is standard for ViT fine‐tuning 
+    lr: 0.0001                              # Base LR=1×10⁻⁴ for full backbone + head 
+    weight_decay: 0.05                      # Weight decay ≈0.05 to regularize the Transformer 
+
+  scheduler:
+    type: "CosineAnnealingLR"               # Cosine‐annealing schedule to decay LR to near 0 
+    t_max: 24                               # Decay over 24 epochs
+    min_lr: 1e-06                           # Minimum LR at end of cosine cycle
+
+  warmup_epochs: 3                          # Warm up LR for first 3 out of 24 epochs (≈10%) 
+
+  amp_enabled: True                         # Use mixed precision to speed up training and save memory 
+  accum_steps: 1                            # No gradient accumulation for simplicity
+  val_interval: 1                           # Validate every epoch
+  model_selection_metric: "mean_optimal_sensitivity"  # Primary metric for model selection
+  save_optimal_thresholds: True             # Save PR‐curve thresholds if needed
+  early_stopping_patience: 5                # Stop if no improvement for 5 epochs 
+
+  ema_decay: 0.999                          # EMA decay rate for model weights 
+  use_ema_for_val: True                     # Use EMA weights during validation
+
+  freeze_epochs: 0                          # No freezing: fine‐tune entire backbone immediately
+  backbone_lr_mult: 1.0                     # Since backbone is pre‐trained, we keep single LR
+
+  loss:
+    type: "cross_entropy"                   # Standard CE with label smoothing
+    label_smoothing: 0.1                    # Label smoothing = 0.1 to prevent overconfidence 
+
+  mixup_alpha: 1.0                          # Mixup α parameter for data augmentation 
+  cutmix_alpha: 1.0                         # CutMix α parameter 
+  mixup_prob: 0.5                           # Apply Mixup/CutMix with 50% probability
+
+  drw_schedule_epochs: []                   # Not used for CE
+  pauc_max_fpr: 0.2                         # Partial AUC FPR threshold
+
+# --- Meta‐Tuning Phase (Head‐Only) ---
+meta_tuning:
+  enable: True                              # Enable head‐only fine‐tuning after full fine‐tuning
+  num_epochs: 12                            # 12 epochs of head‐only fine‐tuning 
+  batch_size: 128                           # Larger batch for head (backbone frozen) 
+
+  optimizer:
+    type: "AdamW"
+    lr: 0.0005                              # Head LR = 5× backbone LR (0.0001×5 = 0.0005) 
+    weight_decay: 0.001                     # Smaller weight decay for head only 
+
+  scheduler:
+    type: "CosineAnnealingLR"
+    t_max: 12
+    min_lr: 1e-06
+
+  warmup_epochs: 1                           # 1 epoch warmup out of 12
+  val_interval: 1
+  early_stopping_patience: 3                 # Shorter patience for head‐only 
+
+# --- Data Handling & Augmentations ---
+data:
+  num_workers: 8                            # Use 8 CPU workers
+  prefetch_factor: 4                        # Each worker prefetches 4 batches
+  sampler:
+    type: "default"                         # Balanced sampling not required for DINOv2 
+
+  cpu_augmentations:
+    resize: 256                             # Resize shorter edge to 256
+    crop_size: 224                          # Then RandomResizedCrop to 224 
+    norm_mean: [0.485, 0.456, 0.406]         # Standard ImageNet normalization 
+    norm_std: [0.229, 0.224, 0.225]
+
+    train:
+      random_resized_crop:                   # RandomResizedCrop parameters
+        scale: [0.08, 1.0]                  # Scale range for cropping 
+        ratio: [0.75, 1.333]                # Aspect‐ratio range
+
+      random_horizontal_flip_p: 0.5          # Horizontal flip with probability 0.5 
+      random_grayscale_p: 0.2                # Convert to grayscale with probability 0.2 
+      color_jitter:                          # ColorJitter parameters (apply with p=0.8)
+        brightness: 0.4
+        contrast: 0.4
+        saturation: 0.4
+        hue: 0.1
+        p: 0.8
+
+      rand_augment:                          # RandAugment (N=2, M=9) with prob=0.5 
+        N: 2
+        M: 9
+        p: 0.5
+
+      mixup:
+        alpha: 1.0
+        prob: 0.5
+
+      cutmix:
+        alpha: 1.0
+        prob: 0.5
+
+      random_erasing:
+        p: 0.25                             # Apply RandomErasing with 0.25 probability 
+        scale: [0.02, 0.33]
+        ratio: [0.3, 3.3]
+
+  gpu_augmentations:
+    enable: False
+    pipeline: []
+
+# --- Paths Configuration ---
+paths:
+  labels_csv: "../splits/training/labels.csv"
+  train_root: "../splits/training"
+  log_dir: "../outputs/tensorboard/dinov2_experiment"
+  ckpt_dir: "../outputs/checkpoints/dinov2_experiment"
+
+# --- PyTorch Compile (optional) ---
+torch_compile:
+  enable: False
+  mode: "default"
+
+# --- TensorBoard Logging ---
+tensorboard_logging:
+  enable: True
+  log_interval_batches_train: 40
+  log_interval_batches_val: 10
+  log_epoch_summary: True
+  log_lr: True
+  log_throughput: True
+  log_gpu_time_epoch: True
+
+  image_logging:
+    enable: True
+    num_samples: 4
+    denormalize: True
+    log_at_epochs: [3, 12, 23]             # Example epochs for logging
+    gradcam_layer: "blocks.10"             # Adjust layer name for ViT‐S/14 :contentReference[oaicite:32]{index=32}
+    log_train_input: False
+    log_val_input: False
+
+  profiler:
+    enable: False
+    profile_epoch: 1
+    wait_steps: 5
+    warmup_steps: 5
+    active_steps: 10
+    repeat_cycles: 0
+    record_shapes: True
+    profile_memory: True
+    with_stack: True
+    sort_by: "self_cuda_time_total"
+    row_limit: 20
+    export_chrome_trace_manual: False
+
+  memory_logging:
+    enable: True
+    log_interval_batches: 100
+    log_epoch_summary: True

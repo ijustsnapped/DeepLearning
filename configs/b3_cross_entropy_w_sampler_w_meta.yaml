@@ -1,0 +1,169 @@
+# Adapted Configuration for train_single_fold_with_meta.py
+
+# --- Experiment Setup ---
+experiment_setup:
+  experiment_name: "meta_effb0_CE_fold_run"
+  seed: 42
+  device: "cuda"
+  TQDM_NCOLS: 100
+
+# --- Model Configuration ---
+model:
+  base_cnn_type: "efficientnet_b0"      # Matches original "type"
+  pretrained_cnn: true                  # Use pretrained weights
+  # num_classes (output dim) is set by the script at runtime
+  meta_head_args:
+    meta_mlp_hidden_dim: 128            # Hidden units in metadata MLP
+    meta_mlp_output_dim: 64             # Output features from metadata MLP
+    meta_dropout_p: 0.3                 # Dropout probability in metadata MLP
+    post_concat_dim: 512                # Hidden units after concatenating image & meta features
+    post_concat_dropout_p: 0.4          # Dropout probability after concatenation
+
+# --- Training Loop Parameters (Phase 1: Joint Training) ---
+training:
+  num_epochs: 40                        # Total epochs for Phase 1
+  batch_size: 64
+
+  optimizer:
+    type: "AdamW"
+    lr: 0.0003
+    weight_decay: 0.0001
+
+  scheduler:
+    type: "CosineAnnealingLR"
+    t_max: 40                           # Matches num_epochs
+    min_lr: 0.0
+
+  amp_enabled: true
+  accum_steps: 2
+  val_interval: 1
+  model_selection_metric: "mean_optimal_sensitivity"
+  save_optimal_thresholds_from_pr: true
+  early_stopping_patience: 10
+  ema_decay: 0.0
+  use_ema_for_val: false
+  freeze_epochs: 0
+  backbone_lr_mult: 0.1
+
+  loss:
+    type: "cross_entropy"               # Changed from LDAM to CrossEntropy
+
+  drw_schedule_epochs: []               # Optional DRW schedule (unused for CE)
+  pauc_max_fpr: 0.2
+
+# --- Meta-Tuning Phase Parameters (Phase 2) ---
+meta_tuning:
+  enable: true
+  num_epochs: 20                        # Fine-tuning epochs for metadata head
+  batch_size: 32
+
+  optimizer:
+    type: "AdamW"
+    lr: 0.0001
+    weight_decay: 0.00001
+
+  scheduler:
+    type: "CosineAnnealingLR"
+    t_max: 20                           # Matches Phase 2 num_epochs
+    min_lr: 0.0000001
+
+  val_interval: 1
+  early_stopping_patience: 5
+
+# --- Data Handling & Augmentations ---
+data:
+  num_workers: 8
+  prefetch_factor: 4
+  sampler:
+    type: "class_balanced_sqrt"
+
+  meta_features_names:
+    - "age_zscore"
+    - "anatom_site_general_anterior torso"
+    - "anatom_site_general_head/neck"
+    - "anatom_site_general_lateral torso"
+    - "anatom_site_general_lower extremity"
+    - "anatom_site_general_oral/genital"
+    - "anatom_site_general_palms/soles"
+    - "anatom_site_general_posterior torso"
+    - "anatom_site_general_upper extremity"
+    - "anatom_site_general_nan"
+    - "sex_female"
+    - "sex_male"
+    - "sex_nan"
+  meta_augmentation_p: 0.0
+  meta_nan_fill_value: 0.0
+
+  cpu_augmentations:
+    resize: 256
+    crop_size: 224
+    norm_mean: [0.485, 0.456, 0.406]
+    norm_std: [0.229, 0.224, 0.225]
+    train:
+      random_horizontal_flip_p: 0.5
+      random_vertical_flip_p: 0.0
+      affine_degrees: 15
+      affine_translate: [0.05, 0.05]
+      affine_scale_range: [0.9, 1.1]
+      affine_shear_degrees: 10
+      color_jitter_brightness: 0.1
+      color_jitter_contrast: 0.1
+      color_jitter_saturation: 0.1
+      color_jitter_hue: 0.1
+      rand_aug_n: 2
+      rand_aug_m: 9
+
+  gpu_augmentations:
+    enable: false
+    pipeline: []
+
+# --- Paths Configuration ---
+paths:
+  labels_csv: "../splits/training/labels.csv"
+  meta_csv: "../splits/training/hot_one_meta.csv"
+  train_root: "../splits/training"
+  log_dir: "../outputs/tensorboard"
+  ckpt_dir: "../outputs/checkpoints"
+
+# --- PyTorch Compile (optional) ---
+torch_compile:
+  enable: false
+  mode: "default"
+
+# --- TensorBoard Logging ---
+tensorboard_logging:
+  enable: true
+  log_interval_batches_train: 40
+  log_interval_batches_val: 10
+  log_epoch_summary: true
+  log_lr: true
+  log_throughput: true
+  log_gpu_time_epoch: true
+
+  image_logging:
+    enable: true
+    num_samples: 4
+    denormalize: true
+    log_at_epochs: [2, 20, 39]
+    gradcam_layer: "blocks.6"
+    log_train_input: false
+    log_val_input: false
+
+  profiler:
+    enable: false
+    profile_epoch: 1
+    wait_steps: 5
+    warmup_steps: 5
+    active_steps: 10
+    repeat_cycles: 0
+    record_shapes: true
+    profile_memory: true
+    with_stack: true
+    sort_by: "self_cuda_time_total"
+    row_limit: 20
+    export_chrome_trace_manual: false
+
+  memory_logging:
+    enable: true
+    log_interval_batches: 100
+    log_epoch_summary: true

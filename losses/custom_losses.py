@@ -1,4 +1,3 @@
-# your_project_name/losses/custom_losses.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -31,81 +30,51 @@ class LDAMLoss(nn.Module):
                  effective_number_beta: float = 0.999,
                  scale: float = 30.0,
                  weight: torch.Tensor | None = None):
-        super(LDAMLoss, self).__init__()
+        super().__init__()
         if class_counts is None or len(class_counts) == 0:
             raise ValueError("class_counts must be provided for LDAMLoss.")
 
-        num_classes = len(class_counts)
-        self.s = scale
-        self.weight = weight # This can be updated by DRW
+        counts = np.array(class_counts, dtype=np.float32)
 
         if use_effective_number_margin:
-            if effective_number_beta < 0 or effective_number_beta >= 1:
-                logger.warning(f"effective_number_beta should be in [0, 1). Got {effective_number_beta}. Clamping or using default logic.")
-            # Calculate effective number of samples
-            effective_num = 1.0 - np.power(effective_number_beta, class_counts)
-            # per_cls_weights = (1.0 - effective_number_beta) / np.array(effective_num) # This was calculated but not used for margins
-            # per_cls_weights = per_cls_weights / np.sum(per_cls_weights) * num_classes
-            
-            # Calculate margin based on effective number
-            logger.info(f"LDAM using effective number based margin. Beta: {effective_number_beta}. Max margin: {max_margin}. Effective numbers (first 5): {effective_num[:5]}")
-            # Use effective_num for margin calculation. Clip to avoid issues with very small effective_num.
-            safe_effective_num = np.maximum(effective_num, 1e-6) 
-            margins_raw = safe_effective_num ** (-0.25)
+            if not (0 <= effective_number_beta < 1):
+                logger.warning(f"effective_number_beta should be in [0,1). Got {effective_number_beta}.")
+            effective_num = 1.0 - np.power(effective_number_beta, counts)
+            safe_num = np.maximum(effective_num, 1e-6)
+            margins_raw = safe_num ** (-0.25)
         else:
-            # Use fixed margins if not using effective number, based on raw counts
-            logger.info(f"LDAM using class count based margin (power -1/4). Max margin: {max_margin}. Class counts (first 5): {np.array(class_counts)[:5]}")
-            safe_class_counts = np.maximum(class_counts, 1) # Avoid division by zero if a class has 0 samples
-            margins_raw = safe_class_counts ** (-0.25)
+            safe_counts = np.maximum(counts, 1.0)
+            margins_raw = safe_counts ** (-0.25)
 
-        # Normalize margins so the largest calculated margin (for rarest class or smallest effective_num) becomes 1.0
-        if np.max(margins_raw) > 1e-12: # Avoid division by zero if all margins are zero
-            margins_normalized = margins_raw / np.max(margins_raw)
-        else:
-            logger.warning("Max of raw margins is close to zero. Using uniform margins of 1.0 before scaling.")
-            margins_normalized = np.ones_like(margins_raw, dtype=float)
-            
-        # Scale by the user-defined max_margin
-        margins = margins_normalized * max_margin
-        margins = torch.from_numpy(margins.astype(np.float32)).float() # Ensure float32
+        # Normalize & scale margins
+        margins = (margins_raw / margins_raw.max()) * max_margin
+        m = torch.from_numpy(margins).float()        # shape [num_classes]
+        self.register_buffer("margins", m)           # auto-moves with .to(device)
+        self.s = scale
+        self.weight = weight
 
-        self.margins = margins.unsqueeze(0) # Shape [1, num_classes] for broadcasting
-        # Log the final calculated margins after normalization and scaling by max_margin
-        logger.info(f"LDAM final margins (first 5): {self.margins[0, :5].cpu().numpy()}")
+        logger.info(f"LDAM final margins (first 5): {self.margins[:5].cpu().numpy()}")
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-        if self.margins.device != logits.device:
-            self.margins = self.margins.to(logits.device)
+        # gather per-sample margins
+        batch_m = self.margins[targets]               # [batch]
+        # subtract margin from true-class logits
+        logits_adj = logits.clone()
+        idx = torch.arange(logits.size(0), device=logits.device)
+        logits_adj[idx, targets] -= batch_m
 
-        # Create one-hot targets and subtract margin for target classes
-        index = torch.zeros_like(logits, dtype=torch.bool) # MODIFIED: Changed dtype to torch.bool
-        index.scatter_(1, targets.data.view(-1, 1), 1)
-        
-        # Create margin tensor for subtraction
-        # margin_sub = self.margins[index] # Direct use of boolean index if margins is [num_classes]
-        # We need to subtract m_j from logit_j for the target class j
-        # So, construct a batch_margins tensor where only target class has its margin, others 0
-        batch_margins = torch.zeros_like(logits)
-        # index here is already boolean, no need for .bool()
-        batch_margins.scatter_(1, targets.data.view(-1,1), self.margins.repeat(logits.size(0),1)[index].view(-1,1))
-
-
-        x_m = logits - batch_margins # Subtract margin only from the target class logit
-        
-        # Standard cross-entropy after adjusting logits
-        # Apply scaling factor s
-        output = torch.where(index, x_m, logits) # Use adjusted logits for target class, original for others (index is already bool)
-        
-        log_probs = F.log_softmax(self.s * output, dim=1)
-        loss = F.nll_loss(log_probs, targets, weight=self.weight.to(logits.device) if self.weight is not None else None)
-        
-        return loss
+        # scaled log-softmax + nll loss
+        logp = F.log_softmax(self.s * logits_adj, dim=1)
+        return F.nll_loss(
+            logp,
+            targets,
+            weight=self.weight.to(logits.device) if self.weight is not None else None
+        )
 
     def update_weights(self, new_weights: torch.Tensor | None):
-        """Used by DRW schedule to update class weights."""
         if new_weights is not None:
-            logger.info(f"LDAMLoss weights updated. New weights (first 5): {new_weights}")
-            self.weight = new_weights.float() # Ensure float
+            logger.info(f"LDAMLoss weights updated (first 5): {new_weights[:5]}")
+            self.weight = new_weights.float()
         else:
-            logger.info("LDAMLoss weights reset (set to None).")
+            logger.info("LDAMLoss weights reset to None.")
             self.weight = None
